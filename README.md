@@ -20,18 +20,21 @@ App is intended for educational and security purposes only, and has no signal tr
 
 ## **Supported Protocols**
 
-| Protocol                      | Decoder | Encoder |
-|:------------------------------|:--------|:--------|
-| Fiat V0                       | ✅ | ✅ |
-| Ford V0                       | ✅ | ✅ |
-| Kia V0 / V1 / V2 / V3 / V4    | ✅ | ✅ |
-| Kia V5 / V6                   | ✅ | ❌ |
-| Scher-Khan                    | ✅ | ❌ |
-| StarLine                      | ✅ | ✅ |
-| Subaru                        | ✅ | ✅ |
-| Suzuki                        | ✅ | ✅ |
-| PSA                           | ✅ | ✅ |
-| VAG (VW)                      | ✅ | ✅ |
+| Protocol                      | Decoder | Encoder | Encoding | RF | Encryption | Frequency |
+|:------------------------------|:--------|:--------|:--------|:--------|:--------|:--------|
+| Fiat V0                       | ✅ | ✅ | Manchester  | FM    | Fixed Code    | 433.92            |
+| Ford V0                       | ✅ | ✅ | Manchester  | FM    | Fixed Code    | 433.92            |
+| Kia V0                        | ✅ | ✅ | PWM         | FM    | Fixed Code    | 433.92            |
+| Kia V1                        | ✅ | ✅ | Manchester  | AM    | Fixed Code    | 315.00 / 433.92   |
+| Kia V2                        | ✅ | ✅ | Manchester  | FM    | Fixed Code    | 315.00 / 433.92   |
+| Kia V3 / V4                   | ✅ | ✅ | PWM         | AM/FM | KeeLoq        | 315.00 / 433.92   |
+| Kia V5 / V6                   | ✅ | ❌ | Manchester  | FM    | Fixed Code    | 433.92            |
+| PSA (Peugeot/Citroen)         | ✅ | ✅ | Manchester  | FM    | XTEA/XOR      | 433.92            |
+| Scher-Khan                    | ✅ | ❌ | PWM         | FM    | Magic Code    | 433.92            |
+| StarLine                      | ✅ | ✅ | PWM         | AM    | KeeLoq        | 433.92            |
+| Subaru                        | ✅ | ✅ | PWM         | AM    | Rolling Code  | 433.92            |
+| Suzuki                        | ✅ | ✅ | PWM         | AM    | Rolling Code  | 433.92            |
+| VAG (VW/Audi/Seat/Skoda)      | ✅ | ✅ | Manchester  | AM    | AUT64/XTEA    | 433.92 / 434.42   |
 
 _More Coming Soon_
 
