@@ -5,6 +5,37 @@
 
 #define TAG "VAGProtocol"
 
+#define VAG_ENCODER_UPLOAD_MAX_SIZE 680
+// uncomment to enable
+//#define VAG_CHECK_UPLOAD_OVERFLOW
+
+/* Manchester emit helper: one bit -> two half-bits */
+#define VAG_EMIT_MANCHESTER(u, idx, bit, te)                 \
+    do {                                                     \
+        if(bit) {                                            \
+            (u)[(idx)++] = level_duration_make(true, (te));  \
+            (u)[(idx)++] = level_duration_make(false, (te)); \
+        } else {                                             \
+            (u)[(idx)++] = level_duration_make(false, (te)); \
+            (u)[(idx)++] = level_duration_make(true, (te));  \
+        }                                                    \
+    } while(0)
+
+#ifdef VAG_CHECK_UPLOAD_OVERFLOW
+/* Guard against upload buffer overflow; set size_upload=0 on failure */
+#define VAG_UPLOAD_NEED(inst, idx, need)                                                    \
+    do {                                                                                    \
+        if(((idx) + (need)) > VAG_ENCODER_UPLOAD_MAX_SIZE) {                                \
+            FURI_LOG_E(                                                                     \
+                TAG, "Upload overflow (need=%u idx=%zu)", (unsigned)(need), (size_t)(idx)); \
+            (inst)->size_upload = 0;                                                        \
+            return;                                                                         \
+        }                                                                                   \
+    } while(0)
+#else
+#define VAG_UPLOAD_NEED(inst, idx, need)
+#endif
+
 static const SubGhzBlockConst subghz_protocol_vag_const = {
     .te_short = 500,
     .te_long = 1000,
@@ -27,13 +58,13 @@ static const SubGhzBlockConst subghz_protocol_vag_const = {
 #define VAG_T34_PREAMBLE_MIN 31u
 #define VAG_T34_SYNC_PAIRS   3u
 
-#define VAG_DATA_GAP_MIN     4001u
-#define VAG_TOTAL_BITS       80u
-#define VAG_KEY1_BITS        64u
-#define VAG_PREFIX_BITS      15u
-#define VAG_BIT_LIMIT        96u
-#define VAG_FRAME_PREFIX_T1  0x2F3Fu
-#define VAG_FRAME_PREFIX_T2  0x2F1Cu
+#define VAG_DATA_GAP_MIN    4001u
+#define VAG_TOTAL_BITS      80u
+#define VAG_KEY1_BITS       64u
+#define VAG_PREFIX_BITS     15u
+#define VAG_BIT_LIMIT       96u
+#define VAG_FRAME_PREFIX_T1 0x2F3Fu
+#define VAG_FRAME_PREFIX_T2 0x2F1Cu
 
 #define VAG_KEYS_COUNT 3
 
@@ -55,15 +86,26 @@ static void protocol_vag_load_keys(const char* file_name) {
     protocol_vag_keys_loaded = 0;
 
     for(uint8_t i = 0; i < VAG_KEYS_COUNT; i++) {
-        uint8_t key_packed[AUT64_KEY_STRUCT_PACKED_SIZE];
+        uint8_t key_packed[AUT64_PACKED_KEY_SIZE];
 
         if(subghz_keystore_raw_get_data(
-               file_name,
-               i * AUT64_KEY_STRUCT_PACKED_SIZE,
-               key_packed,
-               AUT64_KEY_STRUCT_PACKED_SIZE)) {
-            aut64_unpack(&protocol_vag_keys[i], key_packed);
+               file_name, i * AUT64_PACKED_KEY_SIZE, key_packed, AUT64_PACKED_KEY_SIZE)) {
+            int rc = aut64_unpack(&protocol_vag_keys[i], key_packed);
+#ifdef AUT64_ENABLE_VALIDATIONS
+            if(rc == AUT64_ERR_INVALID_PACKED) {
+                FURI_LOG_E(TAG, "Invalid key: %u", i);
+            } else if(rc == AUT64_ERR_NULL_POINTER) {
+                FURI_LOG_E(TAG, "Key is NULL: %d", i);
+            }
+            if(rc == AUT64_OK) {
+                protocol_vag_keys_loaded++;
+            } else {
+                break;
+            }
+#else
+            (void)rc;
             protocol_vag_keys_loaded++;
+#endif
         } else {
             FURI_LOG_E(TAG, "Unable to load key %u", i);
             break;
@@ -218,8 +260,16 @@ static bool vag_aut64_decrypt(uint8_t* block, int key_index) {
         FURI_LOG_E(TAG, "Key not found: %d", key_index + 1);
         return false;
     }
-    aut64_decrypt(*key, block);
-    return true;
+    int rc = aut64_decrypt(key, block);
+#ifdef AUT64_ENABLE_VALIDATIONS
+    if(rc == AUT64_ERR_INVALID_KEY) {
+        FURI_LOG_E(TAG, "Invalid key: %d", key_index + 1);
+    } else if(rc == AUT64_ERR_NULL_POINTER) {
+        FURI_LOG_E(TAG, "key is NULL: %d", key_index + 1);
+    }
+#endif
+
+    return (rc == AUT64_OK) ? true : false;
 }
 
 static void vag_parse_data(SubGhzProtocolDecoderVAG* instance) {
@@ -506,14 +556,11 @@ const SubGhzProtocol vag_protocol = {
 
 void* subghz_protocol_decoder_vag_alloc(SubGhzEnvironment* environment) {
     UNUSED(environment);
-    SubGhzProtocolDecoderVAG* instance = malloc(sizeof(SubGhzProtocolDecoderVAG));
+    SubGhzProtocolDecoderVAG* instance = calloc(1, sizeof(SubGhzProtocolDecoderVAG));
+    furi_check(instance);
     instance->base.protocol = &vag_protocol;
     instance->generic.protocol_name = instance->base.protocol->name;
     instance->decrypted = false;
-    instance->serial = 0;
-    instance->cnt = 0;
-    instance->btn = 0;
-    instance->check_byte = 0;
     instance->key_idx = 0xFF;
 
     protocol_vag_load_keys(APP_ASSETS_PATH("vag"));
@@ -532,6 +579,18 @@ void subghz_protocol_decoder_vag_reset(void* context) {
     SubGhzProtocolDecoderVAG* instance = context;
     instance->decoder.parser_step = VAGDecoderStepReset;
     instance->decrypted = false;
+
+    /* Reset decoder state to avoid stale parsing after external resets */
+    instance->data_low = 0;
+    instance->data_high = 0;
+    instance->bit_count = 0;
+    instance->data_count_bit = 0;
+    instance->vag_type = 0;
+    instance->header_count = 0;
+    instance->mid_count = 0;
+    manchester_advance(
+        instance->manchester_state, ManchesterEventReset, &instance->manchester_state, NULL);
+
     instance->serial = 0;
     instance->cnt = 0;
     instance->btn = 0;
@@ -616,8 +675,7 @@ void subghz_protocol_decoder_vag_feed(void* context, bool level, uint32_t durati
                         instance->data_high = 0;
                         instance->bit_count = 0;
                         instance->vag_type = 1;
-                    } else if(
-                        instance->data_low == VAG_FRAME_PREFIX_T2 && instance->data_high == 0) {
+                    } else if(instance->data_low == VAG_FRAME_PREFIX_T2 && instance->data_high == 0) {
                         instance->data_low = 0;
                         instance->data_high = 0;
                         instance->bit_count = 0;
@@ -677,8 +735,7 @@ void subghz_protocol_decoder_vag_feed(void* context, bool level, uint32_t durati
         break;
 
     case VAGDecoderStepSync2A:
-        if(!level &&
-           DURATION_DIFF(duration, VAG_T34_TE_SHORT) < VAG_T34_TE_DELTA &&
+        if(!level && DURATION_DIFF(duration, VAG_T34_TE_SHORT) < VAG_T34_TE_DELTA &&
            DURATION_DIFF(instance->decoder.te_last, VAG_T34_TE_LONG) < VAG_T34_LONG_DELTA) {
             instance->decoder.te_last = duration;
             instance->decoder.parser_step = VAGDecoderStepSync2B;
@@ -697,8 +754,7 @@ void subghz_protocol_decoder_vag_feed(void* context, bool level, uint32_t durati
         break;
 
     case VAGDecoderStepSync2C:
-        if(!level &&
-           DURATION_DIFF(duration, VAG_T34_SYNC) < VAG_T34_SYNC_DELTA &&
+        if(!level && DURATION_DIFF(duration, VAG_T34_SYNC) < VAG_T34_SYNC_DELTA &&
            DURATION_DIFF(instance->decoder.te_last, VAG_T34_SYNC) < VAG_T34_SYNC_DELTA) {
             instance->mid_count++;
             instance->decoder.parser_step = VAGDecoderStepSync2B;
@@ -955,8 +1011,16 @@ static bool vag_aut64_encrypt(uint8_t* block, int key_index) {
         FURI_LOG_E(TAG, "Key not found for encryption: %d", key_index + 1);
         return false;
     }
-    aut64_encrypt(*key, block);
-    return true;
+    int rc = aut64_encrypt(key, block);
+#ifdef AUT64_ENABLE_VALIDATIONS
+    if(rc == AUT64_ERR_INVALID_KEY) {
+        FURI_LOG_E(TAG, "Invalid key: %d", key_index + 1);
+    } else if(rc == AUT64_ERR_NULL_POINTER) {
+        FURI_LOG_E(TAG, "key is NULL");
+    }
+#endif
+
+    return (rc == AUT64_OK) ? true : false;
 }
 
 static uint8_t vag_get_dispatch_byte(uint8_t btn, uint8_t vag_type) {
@@ -1013,6 +1077,7 @@ static void vag_encoder_build_type1(SubGhzProtocolEncoderVAG* instance) {
 
     size_t index = 0;
     LevelDuration* upload = instance->upload;
+    VAG_UPLOAD_NEED(instance, index, 700);
 
     uint8_t btn_byte = vag_btn_to_byte(instance->btn, 1);
     uint8_t dispatch = vag_get_dispatch_byte(btn_byte, 1);
@@ -1094,13 +1159,7 @@ static void vag_encoder_build_type1(SubGhzProtocolEncoderVAG* instance) {
 #endif
     for(int i = 15; i >= 0; i--) {
         bool bit = (prefix >> i) & 1;
-        if(bit) {
-            upload[index++] = level_duration_make(true, 300);
-            upload[index++] = level_duration_make(false, 300);
-        } else {
-            upload[index++] = level_duration_make(false, 300);
-            upload[index++] = level_duration_make(true, 300);
-        }
+        VAG_EMIT_MANCHESTER(upload, index, bit, 300);
     }
     FURI_LOG_D(TAG, "Prefix 0x%04X: %zu pulses", prefix, index - prefix_start);
 
@@ -1119,13 +1178,7 @@ static void vag_encoder_build_type1(SubGhzProtocolEncoderVAG* instance) {
 #endif
     for(int i = 63; i >= 0; i--) {
         bool bit = (key1_inv >> i) & 1;
-        if(bit) {
-            upload[index++] = level_duration_make(true, 300);
-            upload[index++] = level_duration_make(false, 300);
-        } else {
-            upload[index++] = level_duration_make(false, 300);
-            upload[index++] = level_duration_make(true, 300);
-        }
+        VAG_EMIT_MANCHESTER(upload, index, bit, 300);
     }
     FURI_LOG_D(TAG, "Key1: %zu pulses (64 bits)", index - key1_start);
 
@@ -1137,13 +1190,7 @@ static void vag_encoder_build_type1(SubGhzProtocolEncoderVAG* instance) {
 #endif
     for(int i = 15; i >= 0; i--) {
         bool bit = (key2_inv >> i) & 1;
-        if(bit) {
-            upload[index++] = level_duration_make(true, 300);
-            upload[index++] = level_duration_make(false, 300);
-        } else {
-            upload[index++] = level_duration_make(false, 300);
-            upload[index++] = level_duration_make(true, 300);
-        }
+        VAG_EMIT_MANCHESTER(upload, index, bit, 300);
     }
     FURI_LOG_D(TAG, "Key2: %zu pulses (16 bits)", index - key2_start);
 
@@ -1162,6 +1209,7 @@ static void vag_encoder_build_type2(SubGhzProtocolEncoderVAG* instance) {
 
     size_t index = 0;
     LevelDuration* upload = instance->upload;
+    VAG_UPLOAD_NEED(instance, index, 700);
 
     uint8_t btn_byte = vag_btn_to_byte(instance->btn, 2);
     uint8_t dispatch = vag_get_dispatch_byte(btn_byte, 2);
@@ -1254,13 +1302,7 @@ static void vag_encoder_build_type2(SubGhzProtocolEncoderVAG* instance) {
 #endif
     for(int i = 15; i >= 0; i--) {
         bool bit = (prefix >> i) & 1;
-        if(bit) {
-            upload[index++] = level_duration_make(true, 300);
-            upload[index++] = level_duration_make(false, 300);
-        } else {
-            upload[index++] = level_duration_make(false, 300);
-            upload[index++] = level_duration_make(true, 300);
-        }
+        VAG_EMIT_MANCHESTER(upload, index, bit, 300);
     }
     FURI_LOG_D(TAG, "Prefix 0x%04X: %zu pulses", prefix, index - prefix_start);
 
@@ -1278,13 +1320,7 @@ static void vag_encoder_build_type2(SubGhzProtocolEncoderVAG* instance) {
 #endif
     for(int i = 63; i >= 0; i--) {
         bool bit = (key1_inv >> i) & 1;
-        if(bit) {
-            upload[index++] = level_duration_make(true, 300);
-            upload[index++] = level_duration_make(false, 300);
-        } else {
-            upload[index++] = level_duration_make(false, 300);
-            upload[index++] = level_duration_make(true, 300);
-        }
+        VAG_EMIT_MANCHESTER(upload, index, bit, 300);
     }
     FURI_LOG_D(TAG, "Key1: %zu pulses", index - key1_start);
 
@@ -1296,13 +1332,7 @@ static void vag_encoder_build_type2(SubGhzProtocolEncoderVAG* instance) {
 #endif
     for(int i = 15; i >= 0; i--) {
         bool bit = (key2_inv >> i) & 1;
-        if(bit) {
-            upload[index++] = level_duration_make(true, 300);
-            upload[index++] = level_duration_make(false, 300);
-        } else {
-            upload[index++] = level_duration_make(false, 300);
-            upload[index++] = level_duration_make(true, 300);
-        }
+        VAG_EMIT_MANCHESTER(upload, index, bit, 300);
     }
     FURI_LOG_D(TAG, "Key2: %zu pulses", index - key2_start);
 
@@ -1317,6 +1347,7 @@ static void vag_encoder_build_type3_4(SubGhzProtocolEncoderVAG* instance) {
 
     size_t index = 0;
     LevelDuration* upload = instance->upload;
+    VAG_UPLOAD_NEED(instance, index, 600);
 
     uint8_t btn_byte = vag_btn_to_byte(instance->btn, instance->vag_type);
     uint8_t dispatch = vag_get_dispatch_byte(btn_byte, instance->vag_type);
@@ -1480,15 +1511,8 @@ static void vag_encoder_build_type3_4(SubGhzProtocolEncoderVAG* instance) {
         bool last_level = false;
         for(int i = 15; i >= 0; i--) {
             bool bit = (key2 >> i) & 1;
-            if(bit) {
-                upload[index++] = level_duration_make(true, 500);
-                upload[index++] = level_duration_make(false, 500);
-                last_level = false;
-            } else {
-                upload[index++] = level_duration_make(false, 500);
-                upload[index++] = level_duration_make(true, 500);
-                last_level = true;
-            }
+            VAG_EMIT_MANCHESTER(upload, index, bit, 500);
+            last_level = !bit;
         }
         FURI_LOG_D(
             TAG,
@@ -1581,32 +1605,20 @@ void subghz_protocol_decoder_vag_get_string(void* context, FuriString* output) {
     }
 }
 
-#define VAG_ENCODER_UPLOAD_MAX_SIZE 680
-
 #ifdef ENABLE_EMULATE_FEATURE
 void* subghz_protocol_encoder_vag_alloc(SubGhzEnvironment* environment) {
     UNUSED(environment);
     FURI_LOG_I(TAG, "VAG encoder alloc");
 
-    SubGhzProtocolEncoderVAG* instance = malloc(sizeof(SubGhzProtocolEncoderVAG));
+    SubGhzProtocolEncoderVAG* instance = calloc(1, sizeof(SubGhzProtocolEncoderVAG));
+    furi_check(instance);
     instance->base.protocol = &vag_protocol;
     instance->generic.protocol_name = instance->base.protocol->name;
 
-    instance->upload = malloc(VAG_ENCODER_UPLOAD_MAX_SIZE * sizeof(LevelDuration));
-    instance->size_upload = 0;
+    instance->upload = calloc(VAG_ENCODER_UPLOAD_MAX_SIZE, sizeof(LevelDuration));
+    furi_check(instance->upload);
     instance->repeat = 10;
-    instance->front = 0;
     instance->is_running = false;
-
-    instance->key1_low = 0;
-    instance->key1_high = 0;
-    instance->key2_low = 0;
-    instance->key2_high = 0;
-    instance->serial = 0;
-    instance->cnt = 0;
-    instance->vag_type = 0;
-    instance->btn = 0;
-    instance->dispatch_byte = 0;
     instance->key_idx = 0xFF;
 
     protocol_vag_load_keys(APP_ASSETS_PATH("vag"));
