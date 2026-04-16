@@ -23,6 +23,7 @@
 #include "vag.h"
 #include "star_line.h"
 #include "psa.h"
+#include "honda_static.h"
 
 extern const SubGhzProtocolRegistry protopirate_protocol_registry;
 

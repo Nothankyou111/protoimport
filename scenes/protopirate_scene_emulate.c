@@ -180,6 +180,23 @@ static uint8_t
             return original;
         }
     }
+    // Honda Static
+    else if(strstr(protocol, "Honda Static")) {
+        switch(key) {
+        case InputKeyUp:
+            return 0x1; // Lock
+        case InputKeyOk:
+            return 0x2; // Unlock
+        case InputKeyDown:
+            return 0x4; // Trunk
+        case InputKeyRight:
+            return 0x5; // Remote Start
+        case InputKeyLeft:
+            return 0x8; // Panic
+        default:
+            return original;
+        }
+    }
     // Mazda V0
     else if(strstr(protocol, "Mazda")) {
         switch(key) {

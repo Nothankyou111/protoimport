@@ -21,6 +21,7 @@ const SubGhzProtocol* protopirate_protocol_registry_items[] = {
     &vag_protocol, // Heap: free 29352
     &subghz_protocol_star_line, // Heap: free 18632
     &psa_protocol, // Heap: free 25408
+    &honda_static_protocol,
 };
 // TODO: See above
 // Current HEAP situation:
@@ -38,6 +39,14 @@ const SubGhzProtocolRegistry protopirate_protocol_registry = {
 
 // Protocol timing definitions - mirrors the SubGhzBlockConst in each protocol
 static const ProtoPirateProtocolTiming protocol_timings[] = {
+    // Honda Static
+    {
+        .name = HONDA_STATIC_PROTOCOL_NAME,
+        .te_short = 63,
+        .te_long = 700,
+        .te_delta = 120,
+        .min_count_bit = 64,
+    },
     // Kia V0: PWM encoding, 250/500µs
     {
         .name = "Kia V0",
