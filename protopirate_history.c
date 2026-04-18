@@ -1,44 +1,11 @@
 // protopirate_history.c
 #include "protopirate_history.h"
-#include "defines.h"
 #include "helpers/protopirate_storage.h"
-#include "protocols/protocol_items.h"
-#include <lib/subghz/environment.h>
 #include <lib/subghz/receiver.h>
 #include <storage/storage.h>
 #include <string.h>
 
 #define TAG "ProtoPirateHistory"
-
-static void protopirate_history_shrink_to_first_line(FuriString* s) {
-    const char* c = furi_string_get_cstr(s);
-    size_t n = 0;
-    while(c[n] && c[n] != '\r' && c[n] != '\n') {
-        n++;
-    }
-    furi_string_left(s, n);
-}
-
-static const SubGhzProtocol* protopirate_history_find_protocol_by_name(const char* pname) {
-    if(!pname) return NULL;
-    const char* lookup = pname;
-    if(strcmp(pname, "Kia V3") == 0 || strcmp(pname, "Kia V4") == 0) {
-        lookup = "Kia V3/V4";
-    }
-    for(size_t i = 0; i < protopirate_protocol_registry.size; i++) {
-        if(strcmp(protopirate_protocol_registry.items[i]->name, lookup) == 0) {
-            return protopirate_protocol_registry.items[i];
-        }
-    }
-    if(lookup != pname) {
-        for(size_t i = 0; i < protopirate_protocol_registry.size; i++) {
-            if(strcmp(protopirate_protocol_registry.items[i]->name, pname) == 0) {
-                return protopirate_protocol_registry.items[i];
-            }
-        }
-    }
-    return NULL;
-}
 
 typedef struct {
     FuriString* item_str;
@@ -193,7 +160,6 @@ bool protopirate_history_add_to_history(
     FuriString* text = furi_string_alloc();
     subghz_protocol_decoder_base_get_string(decoder_base, text);
     furi_string_set(item->item_str, text);
-    protopirate_history_shrink_to_first_line(item->item_str);
     furi_string_free(text);
 
     FlipperFormat* temp_ff = flipper_format_string_alloc();
@@ -260,9 +226,22 @@ void protopirate_history_get_text_item_menu(
     }
 
     ProtoPirateHistoryItem* item = ProtoPirateHistoryItemArray_get(instance->data, idx);
+    const char* str = furi_string_get_cstr(item->item_str);
+    const char* newline = strchr(str, '\r');
+    size_t len = 0;
+    if(newline) {
+        len = newline - str;
+    } else {
+        newline = strchr(str, '\n');
+        if(newline) {
+            len = newline - str;
+        } else {
+            len = furi_string_size(item->item_str);
+        }
+    }
+
     uint16_t display_idx = idx + 1;
-    furi_string_printf(
-        output, "%u. %s", display_idx, furi_string_get_cstr(item->item_str));
+    furi_string_printf(output, "%u. %.*s", display_idx, (int)len, str);
 }
 
 void protopirate_history_get_text_item_detail(
@@ -272,6 +251,7 @@ void protopirate_history_get_text_item_detail(
     SubGhzEnvironment* environment) {
     furi_check(instance);
     furi_check(output);
+    UNUSED(environment);
 
     if(idx >= ProtoPirateHistoryItemArray_size(instance->data)) {
         furi_string_set(output, "---");
@@ -279,53 +259,7 @@ void protopirate_history_get_text_item_detail(
     }
 
     ProtoPirateHistoryItem* item = ProtoPirateHistoryItemArray_get(instance->data, idx);
-
-    if(!environment) {
-        furi_string_set(output, item->item_str);
-        return;
-    }
-
-    FlipperFormat* ff = protopirate_history_get_raw_data(instance, idx);
-    if(!ff) {
-        furi_string_set(output, item->item_str);
-        return;
-    }
-
-    FuriString* proto = furi_string_alloc();
-    flipper_format_rewind(ff);
-    if(!flipper_format_read_string(ff, "Protocol", proto)) {
-        furi_string_free(proto);
-        furi_string_set(output, item->item_str);
-        return;
-    }
-
-    const SubGhzProtocol* protocol =
-        protopirate_history_find_protocol_by_name(furi_string_get_cstr(proto));
-    furi_string_free(proto);
-
-    if(!protocol || !protocol->decoder || !protocol->decoder->alloc || !protocol->decoder->free) {
-        furi_string_set(output, item->item_str);
-        return;
-    }
-
-    void* dec = protocol->decoder->alloc(environment);
-    if(!dec) {
-        furi_string_set(output, item->item_str);
-        return;
-    }
-
-    SubGhzProtocolDecoderBase* base = dec;
-    flipper_format_rewind(ff);
-    SubGhzProtocolStatus st = subghz_protocol_decoder_base_deserialize(base, ff);
-    if(st != SubGhzProtocolStatusOk) {
-        protocol->decoder->free(dec);
-        furi_string_set(output, item->item_str);
-        return;
-    }
-
-    furi_string_reset(output);
-    subghz_protocol_decoder_base_get_string(base, output);
-    protocol->decoder->free(dec);
+    furi_string_set(output, item->item_str);
 }
 
 SubGhzProtocolDecoderBase*
@@ -368,21 +302,6 @@ FlipperFormat* protopirate_history_get_raw_data(ProtoPirateHistory* instance, ui
 
 void protopirate_history_commit_loaded(ProtoPirateHistory* instance) {
     furi_check(instance);
-    if(instance->loaded_idx < 0 || !instance->loaded_ff) {
-        return;
-    }
-    if((size_t)instance->loaded_idx >= ProtoPirateHistoryItemArray_size(instance->data)) {
-        return;
-    }
-    ProtoPirateHistoryItem* item =
-        ProtoPirateHistoryItemArray_get(instance->data, (size_t)instance->loaded_idx);
-    if(!item->capture_path) {
-        return;
-    }
-    if(!protopirate_storage_save_capture_to_path(
-           instance->loaded_ff, furi_string_get_cstr(item->capture_path))) {
-        FURI_LOG_E(TAG, "commit_loaded failed for %s", furi_string_get_cstr(item->capture_path));
-    }
 }
 
 void protopirate_history_set_item_str(
@@ -398,5 +317,4 @@ void protopirate_history_set_item_str(
 
     ProtoPirateHistoryItem* item = ProtoPirateHistoryItemArray_get(instance->data, idx);
     furi_string_set(item->item_str, str);
-    protopirate_history_shrink_to_first_line(item->item_str);
 }
